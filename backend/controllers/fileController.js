@@ -1,72 +1,59 @@
-const s3 = require('../config/s3'); // 
-const multer = require('multer');
-const { v4: uuidv4 } = require('uuid');
-const User = require('../models/User'); // 
- 
-const storage = multer.memoryStorage();
-const upload = multer({ storage });
- 
-// Fonction pour uploader un fichier
+const { Storage } = require('@google-cloud/storage');
+const path = require('path');
+const File = require('../models/file');
+
+const storage = new Storage({
+  keyFilename: path.join(__dirname, '../aaronbdata-c4d9dd4860ef.json'),
+  projectId: 'aaronbdata',
+});
+
+const bucketName = 'host_it_bucket';
+const bucket = storage.bucket(bucketName);
+
 exports.uploadFile = async (req, res) => {
-    const userId = req.user.id;
-    const file = req.file;
- 
+  if (!req.file) {
+    return res.status(400).send('No file uploaded.');
+  }
+
+  const blob = bucket.file(req.file.originalname);
+  const blobStream = blob.createWriteStream({
+    resumable: false,
+  });
+
+  blobStream.on('error', (err) => {
+    res.status(500).send({ message: err.message });
+  });
+
+  blobStream.on('finish', async () => {
+    const publicUrl = `https://storage.googleapis.com/${bucket.name}/${blob.name}`;
+
     try {
-        const user = await User.findById(userId);
- 
-        if (!user) {
-            return res.status(404).json({ msg: 'User not found' });
-        }
- 
-        if (user.usedSpace + file.size > user.quota) {
-            return res.status(400).json({ msg: 'Quota exceeded' });
-        }
- 
-        const params = {
-            Bucket: process.env.S3_BUCKET_NAME,
-            Key: `${userId}/${uuidv4()}_${file.originalname}`,
-            Body: file.buffer,
-        };
- 
-        const data = await s3.upload(params).promise();
- 
-        user.usedSpace += file.size;
-        await user.save();
- 
-        res.json({ fileUrl: data.Location });
+      const newFile = new File({
+        name: req.file.originalname,
+        size: req.file.size,
+        url: publicUrl,
+      });
+      await newFile.save();
+
+      res.status(200).send({ fileUrl: publicUrl });
     } catch (error) {
-        console.error(error);
-        res.status(500).send('Server error');
+      res.status(500).send({ message: error.message });
     }
+  });
+
+  blobStream.end(req.file.buffer);
 };
- 
-// Fonction pour supprimer un fichier
+
 exports.deleteFile = async (req, res) => {
-    const { key } = req.body;
- 
-    const params = {
-        Bucket: process.env.S3_BUCKET_NAME,
-        Key: key,
-    };
- 
-    try {
-        const data = await s3.headObject(params).promise();
-        const fileSize = data.ContentLength;
- 
-        await s3.deleteObject(params).promise();
- 
-        const user = await User.findById(req.user.id);
- 
-        if (!user) {
-            return res.status(404).json({ msg: 'User not found' });
-        }
- 
-        user.usedSpace -= fileSize;
-        await user.save();
- 
-        res.json({ msg: 'File deleted' });
-    } catch (error) {
-        console.error(error);
-        res.status(500).send('Server error');
-    }
+  try {
+    const fileName = req.params.name;
+    const file = bucket.file(fileName);
+
+    await file.delete();
+    await File.findOneAndDelete({ name: fileName });
+
+    res.status(200).json({ message: 'File deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
 };
